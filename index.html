@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>HudumaConnect | Government Service Aggregator</title>
+  <!-- Tailwind CSS + Font Awesome + Google Fonts -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+  <style>
+    * { font-family: 'Inter', sans-serif; }
+    body { background: linear-gradient(135deg, #f0f9ff 0%, #e6f0fa 100%); min-height: 100vh; }
+    .card-hover { transition: all 0.2s ease; }
+    .card-hover:hover { transform: translateY(-2px); box-shadow: 0 20px 25px -12px rgba(0, 0, 0, 0.1); }
+    .tab-active { border-bottom: 3px solid #0f3b5f; color: #0f3b5f; font-weight: 600; }
+    .toast-notify { position: fixed; bottom: 24px; right: 24px; z-index: 1000; animation: slideIn 0.2s ease-out; }
+    @keyframes slideIn { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
+    .file-input-label:hover { background-color: #eef2ff; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
+    ::-webkit-scrollbar-thumb { background: #b9d0e7; border-radius: 10px; }
+  </style>
+</head>
+<body class="antialiased">
+
+<div id="app" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-10"></div>
+
+<script>
+  // ---------- MOCK STORAGE (per user) ----------
+  function getUserStorageKey(username) {
+    return `huduma_${username}_data`;
+  }
+
+  // Default empty structure
+  const defaultUserData = {
+    applications: [],     // { id, serviceName, fullName, additionalInfo, createdAt, status, docIds[] }
+    documents: []         // { id, name, fileType, fileUrl, size, uploadedAt, relatedAppId (optional) }
+  };
+
+  function loadUserData(username) {
+    const key = getUserStorageKey(username);
+    const raw = localStorage.getItem(key);
+    if (!raw) {
+      // seed demo example for first time (shows how status tracking works)
+      const demoData = {
+        applications: [
+          {
+            id: "app_001",
+            serviceName: "Passport Renewal",
+            fullName: "Aisha Wanjiku",
+            additionalInfo: "Express processing requested",
+            createdAt: new Date(Date.now() - 86400000 * 2).toISOString(),
+            status: "In Review",
+            docIds: ["doc_demo1"]
+          },
+          {
+            id: "app_002",
+            serviceName: "Driving License",
+            fullName: "Aisha Wanjiku",
+            additionalInfo: "New license category B",
+            createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
+            status: "Approved",
+            docIds: []
+          }
+        ],
+        documents: [
+          {
+            id: "doc_demo1",
+            name: "passport_photo.jpg",
+            fileType: "image/jpeg",
+            fileUrl: "https://placehold.co/400x300?text=Passport+Photo+Mock",
+            size: 245000,
+            uploadedAt: new Date(Date.now() - 86400000 * 2).toISOString(),
+            relatedAppId: "app_001"
+          },
+          {
+            id: "doc_demo2",
+            name: "national_id.pdf",
+            fileType: "application/pdf",
+            fileUrl: "#",
+            size: 1024000,
+            uploadedAt: new Date(Date.now() - 86400000 * 6).toISOString(),
+            relatedAppId: null
+          }
+        ]
+      };
+      localStorage.setItem(key, JSON.stringify(demoData));
+      return demoData;
+    }
+    return JSON.parse(raw);
+  }
+
+  function saveUserData(username, data) {
+    const key = getUserStorageKey(username);
+    localStorage.setItem(key, JSON.stringify(data));
+  }
+
+  // ---------- Global state ----------
+  let currentUser = null;          // { username }
+  let userData = null;             // { applications, documents }
+  let activeTab = "services";      // 'services', 'documents', 'status'
+
+  // Helper to re-render entire main app
+  let toastTimeout = null;
+  function showToast(message, type = "success") {
+    const existingToast = document.querySelector('.toast-notify');
+    if(existingToast) existingToast.remove();
+    const toastDiv = document.createElement('div');
+    toastDiv.className = `toast-notify px-5 py-3 rounded-xl shadow-2xl flex items-center gap-3 ${type === 'success' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'} backdrop-blur-sm`;
+    toastDiv.innerHTML = `<i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'} text-lg"></i><span class="text-sm font-medium">${message}</span>`;
+    document.body.appendChild(toastDiv);
+    if(toastTimeout) clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => toastDiv.remove(), 3000);
+  }
+
+  // update UI after data mutation
+  function updateUserDataAndRender(newData) {
+    userData = newData;
+    saveUserData(currentUser.username, userData);
+    renderMainApp();
+  }
+
+  // Helper to add a new application
+  function addApplication(serviceName, fullName, additionalInfo, uploadedFiles) {
+    const newAppId = `app_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const docIds = [];
+    const newDocs = [];
+    // Process each file into documents array
+    for (let file of uploadedFiles) {
+      const docId = `doc_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      const fileUrl = URL.createObjectURL(file);
+      const docEntry = {
+        id: docId,
+        name: file.name,
+        fileType: file.type,
+        fileUrl: fileUrl,
+        size: file.size,
+        uploadedAt: new Date().toISOString(),
+        relatedAppId: newAppId
+      };
+      newDocs.push(docEntry);
+      docIds.push(docId);
+    }
+    const newApplication = {
+      id: newAppId,
+      serviceName: serviceName,
+      fullName: fullName,
+      additionalInfo: additionalInfo || "",
+      createdAt: new Date().toISOString(),
+      status: "Submitted",
+      docIds: docIds
+    };
+    const updatedData = {
+      applications: [newApplication, ...userData.applications],
+      documents: [...newDocs, ...userData.documents]
+    };
+    updateUserDataAndRender(updatedData);
+    showToast(`✅ Application for ${serviceName} submitted! Track status in dashboard.`);
+    return true;
+  }
+
+  // Direct document upload (independent)
+  function addDirectDocument(file, titleOverride = null) {
+    const docId = `doc_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const fileUrl = URL.createObjectURL(file);
+    const docName = titleOverride ? titleOverride : file.name;
+    const newDoc = {
+      id: docId,
+      name: docName,
+      fileType: file.type,
+      fileUrl: fileUrl,
+      size: file.size,
+      uploadedAt: new Date().toISOString(),
+      relatedAppId: null
+    };
+    const updatedData = {
+      applications: [...userData.applications],
+      documents: [newDoc, ...userData.documents]
+    };
+    updateUserDataAndRender(updatedData);
+    showToast(`📄 Document "${docName}" uploaded successfully.`);
+  }
+
+  function deleteDocument(docId) {
+    const docToDelete = userData.documents.find(d => d.id === docId);
+    if(!docToDelete) return;
+    // Revoke object URL if exists and is blob
+    if(docToDelete.fileUrl && docToDelete.fileUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(docToDelete.fileUrl);
+    }
+    const newDocs = userData.documents.filter(d => d.id !== docId);
+    // Also remove docIds from applications that reference it
+    const newApps = userData.applications.map(app => ({
+      ...app,
+      docIds: app.docIds.filter(id => id !== docId)
+    }));
+    const updatedData = { applications: newApps, documents: newDocs };
+    updateUserDataAndRender(updatedData);
+    showToast("Document removed", "success");
+  }
+
+  // Update status mock (cycle: Submitted -> In Review -> Approved -> Completed)
+  function advanceStatus(appId) {
+    const appIndex = userData.applications.findIndex(a => a.id === appId);
+    if(appIndex === -1) return;
+    const currentStatus = userData.applications[appIndex].status;
+    let nextStatus = currentStatus;
+    if(currentStatus === "Submitted") nextStatus = "In Review";
+    else if(currentStatus === "In Review") nextStatus = "Approved";
+    else if(currentStatus === "Approved") nextStatus = "Completed";
+    else if(currentStatus === "Completed") nextStatus = "Completed";
+    else nextStatus = "Submitted";
+    const updatedApps = [...userData.applications];
+    updatedApps[appIndex] = { ...updatedApps[appIndex], status: nextStatus };
+    const updatedData = { applications: updatedApps, documents: userData.documents };
+    updateUserDataAndRender(updatedData);
+    showToast(`🔄 Status updated to "${nextStatus}" for ${updatedApps[appIndex].serviceName}`);
+  }
+
+  // ---------- RENDER LOGIN ----------
+  function renderLogin() {
+    const appDiv = document.getElementById('app');
+    appDiv.innerHTML = `
+      <div class="min-h-[85vh] flex items-center justify-center">
+        <div class="max-w-md w-full bg-white/70 backdrop-blur-sm rounded-2xl shadow-2xl p-8 border border-white/40 transition-all duration-300">
+          <div class="text-center mb-8">
+            <div class="inline-flex items-center justify-center h-16 w-16 rounded-full bg-indigo-100 text-indigo-800 mb-4">
+              <i class="fas fa-hands-helping text-3xl"></i>
+            </div>
+            <h1 class="text-3xl font-bold text-gray-800">HudumaConnect</h1>
+            <p class="text-gray-500 mt-2">One-stop government service portal</p>
+          </div>
+          <form id="loginForm" class="space-y-5">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+              <div class="relative">
+                <i class="fas fa-user absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+                <input type="text" id="username" class="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-400 focus:outline-none" placeholder="e.g., aisha or any name" autocomplete="off">
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Password (mock)</label>
+              <div class="relative">
+                <i class="fas fa-lock absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+                <input type="password" id="password" class="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-400 focus:outline-none" placeholder="anything works">
+              </div>
+            </div>
+            <button type="submit" class="w-full bg-indigo-700 hover:bg-indigo-800 text-white font-semibold py-3 rounded-xl transition shadow-md flex items-center justify-center gap-2"><i class="fas fa-sign-in-alt"></i> Central Login</button>
+          </form>
+          <p class="text-xs text-gray-400 text-center mt-6">🔐 Mock authentication — any credentials welcome</p>
+        </div>
+      </div>
+    `;
+    document.getElementById('loginForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+      if(!username) {
+        showToast("Please enter username", "error");
+        return;
+      }
+      // central login mock: load or create user data
+      currentUser = { username };
+      userData = loadUserData(username);
+      renderMainApp();
+      showToast(`Welcome, ${username}! 🇰🇪 Huduma services ready.`);
+    });
+  }
+
+  // ---------- RENDER MAIN APP (after login) ----------
+  function renderMainApp() {
+    const appDiv = document.getElementById('app');
+    // header with logout
+    const headerHtml = `
+      <div class="flex flex-wrap justify-between items-center mb-8 bg-white/60 backdrop-blur-sm p-4 rounded-2xl shadow-sm border border-white/30">
+        <div class="flex items-center gap-3">
+          <div class="bg-indigo-700 text-white p-2 rounded-xl"><i class="fas fa-landmark text-xl"></i></div>
+          <div><h1 class="text-2xl font-bold text-gray-800">HudumaConnect</h1><p class="text-xs text-gray-500">Government Service Aggregator • ${currentUser.username}</p></div>
+        </div>
+        <button id="logoutBtn" class="bg-white/80 hover:bg-gray-100 text-gray-700 px-5 py-2 rounded-xl shadow-sm border flex items-center gap-2 transition"><i class="fas fa-sign-out-alt"></i> Logout</button>
+      </div>
+      <!-- Tab Navigation -->
+      <div class="flex border-b border-gray-200 bg-white/40 backdrop-blur-sm rounded-t-2xl px-2 gap-1">
+        <button id="tabServices" class="tab-btn px-5 py-3 text-sm font-medium transition-all flex items-center gap-2 rounded-t-lg ${activeTab === 'services' ? 'tab-active bg-white/50' : 'text-gray-500 hover:text-gray-700'}"><i class="fas fa-file-signature"></i> Apply for Services</button>
+        <button id="tabDocuments" class="tab-btn px-5 py-3 text-sm font-medium transition-all flex items-center gap-2 rounded-t-lg ${activeTab === 'documents' ? 'tab-active bg-white/50' : 'text-gray-500 hover:text-gray-700'}"><i class="fas fa-folder-open"></i> Document Uploads</button>
+        <button id="tabStatus" class="tab-btn px-5 py-3 text-sm font-medium transition-all flex items-center gap-2 rounded-t-lg ${activeTab === 'status' ? 'tab-active bg-white/50' : 'text-gray-500 hover:text-gray-700'}"><i class="fas fa-chart-line"></i> Status Tracking</button>
+      </div>
+      <div class="bg-white/50 backdrop-blur-sm rounded-b-2xl rounded-tr-2xl p-5 md:p-6 shadow-lg border border-t-0 border-gray-200/60" id="tabContent"></div>
+    `;
+    appDiv.innerHTML = headerHtml;
+    // attach logout event
+    document.getElementById('logoutBtn').addEventListener('click', () => {
+      currentUser = null;
+      userData = null;
+      renderLogin();
+      showToast("Logged out safely.");
+    });
+    // tab switching
+    document.getElementById('tabServices').addEventListener('click', () => { activeTab = 'services'; renderMainApp(); });
+    document.getElementById('tabDocuments').addEventListener('click', () => { activeTab = 'documents'; renderMainApp(); });
+    document.getElementById('tabStatus').addEventListener('click', () => { activeTab = 'status'; renderMainApp(); });
+    
+    const tabContainer = document.getElementById('tabContent');
+    if (activeTab === 'services') renderServicesTab(tabContainer);
+    else if (activeTab === 'documents') renderDocumentsTab(tabContainer);
+    else if (activeTab === 'status') renderStatusTab(tabContainer);
+  }
+
+  // ---------- SERVICES TAB (mock flow + document uploads integrated) ----------
+  function renderServicesTab(container) {
+    container.innerHTML = `
+      <div class="max-w-3xl mx-auto">
+        <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 md:p-8">
+          <div class="flex items-center gap-3 mb-6"><i class="fas fa-clipboard-list text-indigo-700 text-2xl"></i><h2 class="text-2xl font-bold text-gray-800">Apply for a Government Service</h2></div>
+          <p class="text-gray-500 mb-6 text-sm">Fill the details below. Upload required documents (ID, photo, proof). After submission, track your application status in real time.</p>
+          <form id="serviceApplicationForm">
+            <div class="grid md:grid-cols-2 gap-5">
+              <div><label class="block text-sm font-medium text-gray-700 mb-1">Full Name *</label><input type="text" id="fullName" required class="w-full border border-gray-200 rounded-xl px-4 py-2.5 focus:ring-2 focus:ring-indigo-300" placeholder="e.g., John Otieno"></div>
+              <div><label class="block text-sm font-medium text-gray-700 mb-1">Select Service *</label>
+                <select id="serviceType" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 bg-white">
+                  <option value="Passport Renewal">📘 Passport Renewal</option>
+                  <option value="Driving License">🚗 Driving License</option>
+                  <option value="Birth Certificate">👶 Birth Certificate</option>
+                  <option value="Business Permit">🏢 Business Permit</option>
+                  <option value="National ID Replacement">🆔 National ID Replacement</option>
+                </select>
+              </div>
+            </div>
+            <div class="mt-4"><label class="block text-sm font-medium text-gray-700 mb-1">Additional Information (optional)</label><textarea id="additionalInfo" rows="2" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" placeholder="Special requests, delivery preference..."></textarea></div>
+            <div class="mt-5 border-2 border-dashed border-indigo-200 rounded-xl p-5 bg-indigo-50/30">
+              <label class="block text-sm font-semibold text-gray-700 mb-2"><i class="fas fa-upload mr-2 text-indigo-600"></i>Upload Supporting Documents</label>
+              <div class="flex items-center justify-center w-full"><label for="appDocs" class="flex flex-col items-center justify-center w-full h-28 rounded-xl bg-white cursor-pointer border border-indigo-200 hover:bg-indigo-50 transition"><div class="flex flex-col items-center justify-center pt-2"><i class="fas fa-cloud-upload-alt text-indigo-500 text-2xl mb-1"></i><p class="text-xs text-gray-500">Click to upload (PDF, JPG, PNG)</p></div><input id="appDocs" type="file" multiple accept="image/*,application/pdf" class="hidden"></label></div>
+              <div id="filePreviewList" class="mt-3 flex flex-wrap gap-2 text-xs"></div>
+            </div>
+            <button type="submit" class="mt-6 w-full bg-indigo-700 hover:bg-indigo-800 text-white font-semibold py-3 rounded-xl shadow-md transition flex items-center justify-center gap-2"><i class="fas fa-paper-plane"></i> Submit Application (Mock)</button>
+          </form>
+        </div>
+        <div class="mt-8 text-center text-gray-400 text-xs"><i class="fas fa-shield-alt"></i> Mock submission — demo environment only</div>
+      </div>
+    `;
+    let selectedFiles = [];
+    const fileInput = document.getElementById('appDocs');
+    const previewDiv = document.getElementById('filePreviewList');
+    fileInput.addEventListener('change', (e) => {
+      selectedFiles = Array.from(e.target.files);
+      previewDiv.innerHTML = selectedFiles.map(f => `<span class="bg-white rounded-full px-3 py-1 shadow-sm text-indigo-700 border"><i class="far fa-file mr-1"></i>${f.name.length > 20 ? f.name.slice(0,18)+'...' : f.name}</span>`).join('');
+    });
+    document.getElementById('serviceApplicationForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const fullName = document.getElementById('fullName').value.trim();
+      const serviceType = document.getElementById('serviceType').value;
+      const additionalInfo = document.getElementById('additionalInfo').value;
+      if(!fullName) { showToast("Full name required", "error"); return; }
+      if(selectedFiles.length === 0) {
+        if(!confirm("No documents uploaded. Most services require documents. Continue anyway?")) return;
+      }
+      addApplication(serviceType, fullName, additionalInfo, selectedFiles);
+      // reset form
+      document.getElementById('serviceApplicationForm').reset();
+      previewDiv.innerHTML = '';
+      selectedFiles = [];
+      fileInput.value = '';
+    });
+  }
+
+  // ---------- DOCUMENT UPLOADS TAB (standalone uploads & library) ----------
+  function renderDocumentsTab(container) {
+    const docs = userData.documents || [];
+    container.innerHTML = `
+      <div>
+        <div class="flex flex-wrap justify-between items-center mb-6 gap-3"><h2 class="text-xl font-bold text-gray-800 flex items-center gap-2"><i class="fas fa-database text-indigo-600"></i>My Document Vault</h2><button id="quickUploadBtn" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl shadow-sm text-sm flex items-center gap-2"><i class="fas fa-plus-circle"></i> Upload New Document</button></div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="documentsGrid"></div>
+        <div id="uploadModal" class="hidden fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50 p-4"><div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl"><h3 class="text-lg font-bold mb-3">Upload Document</h3><input type="text" id="docTitle" placeholder="Document title (optional)" class="w-full border rounded-xl px-4 py-2 mb-3"><input type="file" id="standaloneFile" accept="image/*,application/pdf" class="mb-4"><div class="flex justify-end gap-2"><button id="cancelUpload" class="px-4 py-2 bg-gray-200 rounded-xl">Cancel</button><button id="confirmUpload" class="px-4 py-2 bg-indigo-600 text-white rounded-xl">Upload</button></div></div></div>
+      </div>
+    `;
+    const grid = document.getElementById('documentsGrid');
+    function renderDocList() {
+      const docsArr = userData.documents;
+      if(docsArr.length === 0) {
+        grid.innerHTML = `<div class="col-span-full text-center py-12 bg-gray-50 rounded-2xl"><i class="fas fa-folder-open text-gray-300 text-5xl mb-2"></i><p class="text-gray-400">No documents yet. Upload ID, certificates, etc.</p></div>`;
+        return;
+      }
+      grid.innerHTML = docsArr.map(doc => `
+        <div class="bg-white rounded-xl border border-gray-100 shadow-sm p-4 card-hover transition flex flex-col gap-2">
+          <div class="flex items-start justify-between"><div class="flex items-center gap-2"><i class="fas ${doc.fileType.includes('pdf') ? 'fa-file-pdf text-red-500' : 'fa-file-image text-blue-500'} text-xl"></i><span class="font-medium truncate max-w-[150px]">${doc.name}</span></div><button data-id="${doc.id}" class="delete-doc text-gray-400 hover:text-red-500"><i class="fas fa-trash-alt"></i></button></div>
+          <p class="text-xs text-gray-400">${new Date(doc.uploadedAt).toLocaleDateString()} • ${(doc.size/1024).toFixed(1)} KB</p>
+          ${doc.fileUrl && doc.fileUrl !== '#' ? `<a href="${doc.fileUrl}" target="_blank" class="text-indigo-600 text-xs flex items-center gap-1 mt-1"><i class="fas fa-external-link-alt"></i> Preview</a>` : `<span class="text-gray-300 text-xs">Mock preview</span>`}
+          ${doc.relatedAppId ? `<span class="inline-block bg-indigo-50 text-indigo-700 text-[10px] px-2 py-0.5 rounded-full mt-1"><i class="far fa-file-alt"></i> attached to application</span>` : ''}
+        </div>
+      `).join('');
+      document.querySelectorAll('.delete-doc').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const docId = btn.getAttribute('data-id');
+          if(confirm("Delete this document permanently?")) deleteDocument(docId);
+        });
+      });
+    }
+    renderDocList();
+    const modal = document.getElementById('uploadModal');
+    const quickBtn = document.getElementById('quickUploadBtn');
+    quickBtn.addEventListener('click', () => { modal.classList.remove('hidden'); });
+    document.getElementById('cancelUpload')?.addEventListener('click', () => { modal.classList.add('hidden'); });
+    document.getElementById('confirmUpload')?.addEventListener('click', () => {
+      const fileInputModal = document.getElementById('standaloneFile');
+      const titleInput = document.getElementById('docTitle');
+      const file = fileInputModal.files[0];
+      if(!file) { showToast("Select a file", "error"); return; }
+      const customTitle = titleInput.value.trim() !== "" ? titleInput.value.trim() : file.name;
+      addDirectDocument(file, customTitle);
+      modal.classList.add('hidden');
+      fileInputModal.value = '';
+      titleInput.value = '';
+      renderDocList(); // refresh after update
+    });
+    // re-render on doc changes? But updateUserDataAndRender already refreshes whole app, but we need also ensure grid refreshes
+    // add manual observer since update triggers re-renderDocumentsTab, fine.
+  }
+
+  // ---------- STATUS TRACKING ----------
+  function renderStatusTab(container) {
+    const applications = userData.applications;
+    if(applications.length === 0) {
+      container.innerHTML = `<div class="text-center py-16 bg-white/40 rounded-xl"><i class="fas fa-inbox text-5xl text-gray-300 mb-3"></i><p class="text-gray-500">No service applications yet. Go to "Apply for Services" to start.</p></div>`;
+      return;
+    }
+    // status badge helper
+    const statusColor = (status) => {
+      if(status === 'Submitted') return 'bg-amber-100 text-amber-700';
+      if(status === 'In Review') return 'bg-blue-100 text-blue-700';
+      if(status === 'Approved') return 'bg-green-100 text-green-700';
+      if(status === 'Completed') return 'bg-emerald-100 text-emerald-800';
+      return 'bg-gray-100 text-gray-600';
+    };
+    container.innerHTML = `
+      <div><h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2"><i class="fas fa-chart-simple"></i>Track Your Applications</h2><div class="space-y-5" id="statusList"></div><p class="text-xs text-gray-400 mt-6 text-center"><i class="fas fa-sync-alt"></i> Click 'Advance Status' to simulate processing (Mock workflow)</p></div>
+    `;
+    const listDiv = document.getElementById('statusList');
+    listDiv.innerHTML = applications.map(app => {
+      const relatedDocs = userData.documents.filter(d => app.docIds.includes(d.id));
+      return `
+        <div class="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm transition-all">
+          <div class="flex flex-wrap justify-between items-start gap-2"><div><h3 class="font-bold text-gray-800 text-lg">${app.serviceName}</h3><p class="text-sm text-gray-500">Ref: ${app.id.slice(-8)}</p></div><span class="px-3 py-1 rounded-full text-xs font-semibold ${statusColor(app.status)}"><i class="fas fa-circle mr-1 text-[8px]"></i> ${app.status}</span></div>
+          <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-sm"><div><i class="fas fa-user text-gray-400 w-5"></i> ${app.fullName}</div><div><i class="far fa-calendar-alt text-gray-400"></i> ${new Date(app.createdAt).toLocaleDateString()}</div></div>
+          ${app.additionalInfo ? `<div class="mt-2 text-gray-600 bg-gray-50 p-2 rounded-lg text-sm"><i class="fas fa-info-circle"></i> ${app.additionalInfo}</div>` : ''}
+          ${relatedDocs.length ? `<div class="mt-3 border-t pt-2 text-xs text-gray-500"><i class="fas fa-paperclip"></i> Attached (${relatedDocs.length}): ${relatedDocs.map(d=>d.name).join(', ')}</div>` : '<div class="mt-2 text-xs text-gray-400">📄 No documents attached</div>'}
+          <div class="mt-4 flex justify-end"><button data-id="${app.id}" class="updateStatusBtn bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs px-4 py-2 rounded-full transition flex items-center gap-1"><i class="fas fa-forward"></i> Advance Status (Mock)</button></div>
+        </div>
+      `;
+    }).join('');
+    document.querySelectorAll('.updateStatusBtn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const appId = btn.getAttribute('data-id');
+        advanceStatus(appId);
+      });
+    });
+  }
+
+  // initial load
+  renderLogin();
+</script>
+</body>
+</html>
